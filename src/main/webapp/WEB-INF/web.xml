@@ -1,0 +1,17 @@
+<!DOCTYPE web-app PUBLIC
+ "-//Sun Microsystems, Inc.//DTD Web Application 2.3//EN"
+ "http://java.sun.com/dtd/web-app_2_3.dtd" >
+
+<web-app>
+  <display-name>Migration Service Web Application</display-name>
+  <servlet>
+    <servlet-name>ShibAttributesHandler</servlet-name>
+    <display-name>ShibAttributesHandler</display-name>
+    <description></description>
+    <servlet-class>nl.knaw.dans.dataverse.migration.ShibAttributesHandler</servlet-class>
+  </servlet>
+  <servlet-mapping>
+    <servlet-name>ShibAttributesHandler</servlet-name>
+    <url-pattern>/ShibAttributesHandler</url-pattern>
+  </servlet-mapping>
+</web-app>
