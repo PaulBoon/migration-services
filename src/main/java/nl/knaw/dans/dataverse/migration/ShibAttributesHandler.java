@@ -81,15 +81,9 @@ public class ShibAttributesHandler extends HttpServlet {
     private void eppnChecker(Statement stmt, String shibEppn, String shibMail, String authenticatedUserIdQuery) {
         try {
             stmt = conn.createStatement();
-            int authenticateduser_id = -1;
-            ResultSet resultSetOfAuthenticateduserlookupQuery = stmt.executeQuery(authenticatedUserIdQuery);
-            while (resultSetOfAuthenticateduserlookupQuery.next()) {
-                String persistentuserid = resultSetOfAuthenticateduserlookupQuery.getString("persistentuserid");
-                authenticateduser_id = resultSetOfAuthenticateduserlookupQuery.getInt("authenticateduser_id");
-                LOG.info("persistentuserid: " + persistentuserid + "\tauthenticateduser_id" + authenticateduser_id);
-            }
+            boolean eppnIsCorrectlyUsed = isEppnCorrectlyUsed(stmt, authenticatedUserIdQuery);
 
-            if (authenticateduser_id > 1) {
+            if (eppnIsCorrectlyUsed) {
                 // Do nothing since the eppn is already correctly used.
                 LOG.info(shibMail + " is an existing user that has eppn: " + shibEppn + ". DO NOTHING");
             } else {
@@ -99,8 +93,10 @@ public class ShibAttributesHandler extends HttpServlet {
                 // 2. the eppn is not the same as mail
                 String sql = "select id, email, useridentifier from authenticateduser where email = '"
                         + shibMail.toLowerCase() + "'";
-                int id = -1;
+
+                int id = 0;
                 String email = "";
+                boolean existingUser = false;
 
                 LOG.info("Check the authenticateduserlookup table. Query: " + sql);
                 ResultSet resultSetOfAuthenticateduserQuery = stmt.executeQuery(sql);
@@ -110,35 +106,13 @@ public class ShibAttributesHandler extends HttpServlet {
                     String useridentifier = resultSetOfAuthenticateduserQuery.getString("useridentifier");
                     LOG.info("Query result. id: " + id + "\temail: " + email + "\tuseridentifier: " + useridentifier);
                 }
-                if (id < 1) {
+
+                if (!existingUser) {
                     // A user with the shibMail is not found, so that is a new
                     // user. Do nothing.
                     LOG.info(shibMail + " is a new user that has eppn: " + shibEppn + ". DO NOTHING");
                 } else {
-                    LOG.info(shibMail + " is an existing user that has eppn: " + shibEppn + ". UPDATE IT.");
-                    String fixAuthenticateduserlookupWithEppn = "UPDATE authenticateduserlookup SET persistentuserid ='https://engine.surfconext.nl/authentication/idp/metadata|"
-                            + shibEppn + "' WHERE authenticateduser_id =" + id;
-                    stmt.execute(fixAuthenticateduserlookupWithEppn);
-
-                    //Now, check whether the updated is successfully (and it also to get time to the dataverse ? )
-                    ResultSet resultSetOfAuthenticateduserlookupCheckQuery = stmt.executeQuery(authenticatedUserIdQuery);
-                    String mailMsg = "shib mail: " + shibMail + "\nshibEppn: " + shibEppn + "\nauthenticateduser -email: " + email + "\nauthenticateduser -id: " + id;
-                    int numberOfRow = 0;
-                    while (resultSetOfAuthenticateduserlookupCheckQuery.next()) {
-                        numberOfRow++;
-                    }
-                    if (numberOfRow == 1) {
-                        LOG.info("UPDATE SUCCESSFUL for shib mail: " + shibMail + "\tshibEppn: " + shibEppn);
-                        boolean sendOk = sendSystemEmail("eko.indarto@dans.knaw.nl", "ShibAttributesHandler - " + shibEppn + " - Successfully Updated", mailMsg);
-                        if (!sendOk)
-                            LOG.error("Send email is failed, see the log file.");
-                    } else {
-                        LOG.error("UPDATE ERROR - The number of updated row MUST BE   1 but it is " + numberOfRow);
-                        mailMsg = "\nQuery (authenticatedUserIdQuery): " + authenticatedUserIdQuery + "\nQuery (authenticatedUserIdQuery): " + authenticatedUserIdQuery + "\n" + mailMsg;
-                        boolean sendOk = sendSystemEmail("eko.indarto@dans.knaw.nl", "ShibAttributesHandler -ERROR -- The number of updated row: " + numberOfRow, mailMsg);
-                        if (!sendOk)
-                            LOG.error("Send email is failed, see the log file.");
-                    }
+                    updateEppnOfOldUser(stmt, shibEppn, shibMail, authenticatedUserIdQuery, id, email);
                 }
 
             }
@@ -154,6 +128,51 @@ public class ShibAttributesHandler extends HttpServlet {
                 }
 
         }
+    }
+
+    private void updateEppnOfOldUser(Statement stmt, String shibEppn, String shibMail, String authenticatedUserIdQuery, int id, String email) throws SQLException {
+        LOG.info(shibMail + " is an existing user that has eppn: " + shibEppn + ". UPDATE IT.");
+        String fixAuthenticateduserlookupWithEppn = "UPDATE authenticateduserlookup SET persistentuserid ='https://engine.surfconext.nl/authentication/idp/metadata|"
+                + shibEppn + "' WHERE authenticateduser_id =" + id;
+        stmt.execute(fixAuthenticateduserlookupWithEppn);
+
+        //Now, check whether the updated is successfully (and it also to get time to the dataverse ? )
+        ResultSet resultSetOfAuthenticateduserlookupCheckQuery = stmt.executeQuery(authenticatedUserIdQuery);
+        String mailMsg = "shib mail: " + shibMail + "\nshibEppn: " + shibEppn + "\nauthenticateduser -email: " + email + "\nauthenticateduser -id: " + id;
+        int numberOfRow = 0;
+        while (resultSetOfAuthenticateduserlookupCheckQuery.next()) {
+            numberOfRow++;
+        }
+        if (numberOfRow == 0) {
+            //Updated is not success.
+            LOG.error("UPDATE ERROR -  authenticateduserlookup is NOT UPDATED.");
+            mailMsg = "\nQuery (authenticatedUserIdQuery): " + authenticatedUserIdQuery + "\nQuery (authenticatedUserIdQuery): " + authenticatedUserIdQuery + "\n" + mailMsg;
+            boolean sendOk = sendSystemEmail("eko.indarto@dans.knaw.nl", "ShibAttributesHandler -ERROR --  NO UPDATED ROW. ", mailMsg);
+            if (!sendOk)
+                LOG.error("Send email is failed, see the log file.");
+        } else if (numberOfRow == 1) {
+            LOG.info("UPDATE SUCCESSFUL for shib mail: " + shibMail + "\tshibEppn: " + shibEppn);
+            boolean sendOk = sendSystemEmail("eko.indarto@dans.knaw.nl", "ShibAttributesHandler - " + shibEppn + " - Successfully Updated", mailMsg);
+            if (!sendOk)
+                LOG.error("Send email is failed, see the log file.");
+        } else {
+            LOG.error("UPDATE ERROR - The number of updated row MUST BE 1 but it is " + numberOfRow);
+            mailMsg = "\nQuery (authenticatedUserIdQuery): " + authenticatedUserIdQuery + "\nQuery (authenticatedUserIdQuery): " + authenticatedUserIdQuery + "\n" + mailMsg;
+            boolean sendOk = sendSystemEmail("eko.indarto@dans.knaw.nl", "ShibAttributesHandler -ERROR -- The number of updated row: " + numberOfRow, mailMsg);
+            if (!sendOk)
+                LOG.error("Send email is failed, see the log file.");
+        }
+    }
+
+    private boolean isEppnCorrectlyUsed(Statement stmt, String authenticatedUserIdQuery) throws SQLException {
+        ResultSet resultSetOfAuthenticateduserlookupQuery = stmt.executeQuery(authenticatedUserIdQuery);
+        while (resultSetOfAuthenticateduserlookupQuery.next()) {
+            String persistentuserid = resultSetOfAuthenticateduserlookupQuery.getString("persistentuserid");
+            int authenticateduser_id = resultSetOfAuthenticateduserlookupQuery.getInt("authenticateduser_id");
+            LOG.info("persistentuserid: " + persistentuserid + "\tauthenticateduser_id" + authenticateduser_id);
+            return true;
+        }
+        return false;
     }
 
     /**
