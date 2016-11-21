@@ -1,12 +1,9 @@
 package nl.knaw.dans.dataverse.migration;
 
-import java.io.IOException;
-import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Statement;
-import java.util.Date;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import javax.annotation.Resource;
 import javax.mail.Message;
 import javax.mail.MessagingException;
 import javax.mail.Session;
@@ -21,11 +18,13 @@ import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.sql.DataSource;
-
-import javax.annotation.Resource;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import java.io.IOException;
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.Date;
+import java.util.Optional;
 
 
 /**
@@ -64,12 +63,9 @@ public class ShibAttributesHandler extends HttpServlet {
         String shibEntitlement = (String) request.getAttribute("entitlement");
         String shibMail = ((String) request.getAttribute("mail")).split(";")[0];
         LOG.info("Attribute - eppn: " + shibEppn + "\tAttribute - givenName: " + givenName + "\tAttribute -entitlement: " + shibEntitlement + "\tAttribute - mail: " + shibMail);
-        String authenticatedUserIdQuery = "select persistentuserid, authenticateduser_id from authenticateduserlookup where authenticationproviderid='shib' and persistentuserid ='https://engine.surfconext.nl/authentication/idp/metadata|"
-                + shibEppn + "'";
 
-        LOG.info("Query: " + authenticatedUserIdQuery);
         if (shibEppn != null && !shibEppn.isEmpty() && shibMail != null && !shibMail.isEmpty()) {
-            eppnChecker(stmt, shibEppn, shibMail, authenticatedUserIdQuery);
+            eppnChecker(stmt, shibEppn, shibMail);
         } else {
             LOG.error("FATAL ERROR, eppn and email are required!");
             response.sendRedirect("/error.html");
@@ -78,33 +74,38 @@ public class ShibAttributesHandler extends HttpServlet {
         response.sendRedirect("https://" + request.getServerName() + "/shib.xhtml");
     }
 
-    private void eppnChecker(Statement stmt, String shibEppn, String shibMail, String authenticatedUserIdQuery) {
+    private void eppnChecker(Statement stmt, String shibEppn, String shibMail) {
         try {
             stmt = conn.createStatement();
+            String authenticatedUserIdQuery = "select persistentuserid, authenticateduser_id from authenticateduserlookup where authenticationproviderid='shib' and persistentuserid ='https://engine.surfconext.nl/authentication/idp/metadata|"
+                    + shibEppn + "'";
+
+            LOG.info("Query to check whether the eppn is correctly used: " + authenticatedUserIdQuery);
             boolean eppnIsCorrectlyUsed = isEppnCorrectlyUsed(stmt, authenticatedUserIdQuery);
 
             if (eppnIsCorrectlyUsed) {
                 // Do nothing since the eppn is already correctly used.
-                LOG.info(shibMail + " is an existing user that has eppn: " + shibEppn + ". DO NOTHING");
+                LOG.info(shibMail + " is an existing user. EPPN (" + shibEppn + ") is used correctly. DO NOTHING");
             } else {
                 // eppn isn't in the authenticateduserlookup table
                 // There are 2 possibilities:
                 // 1. an new user or
                 // 2. the eppn is not the same as mail
-                String sql = "select id, email, useridentifier from authenticateduser where email = '"
-                        + shibMail.toLowerCase() + "'";
+                String sql = "select id, email, useridentifier from authenticateduser where email in ('"
+                        + shibMail + "', '" + shibMail.toLowerCase() + "')";
 
                 int id = 0;
                 String email = "";
                 boolean existingUser = false;
 
-                LOG.info("Check the authenticateduserlookup table. Query: " + sql);
+                LOG.info("Check the authenticateduser table. Query: " + sql);
                 ResultSet resultSetOfAuthenticateduserQuery = stmt.executeQuery(sql);
                 while (resultSetOfAuthenticateduserQuery.next()) {
                     id = resultSetOfAuthenticateduserQuery.getInt("id");
                     email = resultSetOfAuthenticateduserQuery.getString("email");
                     String useridentifier = resultSetOfAuthenticateduserQuery.getString("useridentifier");
                     LOG.info("Query result. id: " + id + "\temail: " + email + "\tuseridentifier: " + useridentifier);
+                    existingUser = true;
                 }
 
                 if (!existingUser) {
@@ -131,9 +132,23 @@ public class ShibAttributesHandler extends HttpServlet {
     }
 
     private void updateEppnOfOldUser(Statement stmt, String shibEppn, String shibMail, String authenticatedUserIdQuery, int id, String email) throws SQLException {
-        LOG.info(shibMail + " is an existing user that has eppn: " + shibEppn + ". UPDATE IT.");
-        String fixAuthenticateduserlookupWithEppn = "UPDATE authenticateduserlookup SET persistentuserid ='https://engine.surfconext.nl/authentication/idp/metadata|"
-                + shibEppn + "' WHERE authenticateduser_id =" + id;
+        String fixAuthenticateduserlookupWithEppn = "";
+        //first check whether the user is already in authenticateduserlookup table
+        boolean userExistInAuthencticatedlookup = findUserInAuthenticateduserlookupById(stmt, id);
+
+        if (userExistInAuthencticatedlookup) {
+            //Update it
+            LOG.info(shibMail + " is an existing user that has eppn: " + shibEppn + " and email: " + email + ". UPDATE IT.");
+            fixAuthenticateduserlookupWithEppn = "UPDATE authenticateduserlookup SET persistentuserid ='https://engine.surfconext.nl/authentication/idp/metadata|"
+                    + shibEppn + "' WHERE authenticateduser_id =" + id;
+
+        } else {
+            //Insert it.
+            LOG.info(shibMail + " is an existing user that has eppn: " + shibEppn + " and email: " + email + ". INSERT IT.");
+            fixAuthenticateduserlookupWithEppn = "INSERT INTO authenticateduserlookup (persistentuserid, authenticateduser_id) values='https://engine.surfconext.nl/authentication/idp/metadata|"
+                    + shibEppn + "'," + id + ")";
+        }
+        LOG.info("updateEppnOfOldUser query: " + fixAuthenticateduserlookupWithEppn);
         stmt.execute(fixAuthenticateduserlookupWithEppn);
 
         //Now, check whether the updated is successfully (and it also to get time to the dataverse ? )
@@ -162,6 +177,16 @@ public class ShibAttributesHandler extends HttpServlet {
             if (!sendOk)
                 LOG.error("Send email is failed, see the log file.");
         }
+    }
+
+    private boolean findUserInAuthenticateduserlookupById(Statement stmt, int id) throws SQLException {
+        String findAuthenticateduserlookupByIdQuery = "Select id from authenticateduserlookup where authenticateduser_id = " + id;
+        LOG.info("Find user authenticatedlookup by Id, query: " + findAuthenticateduserlookupByIdQuery);
+        ResultSet resultSetOfAuthenticateduserlookupCheckByid = stmt.executeQuery(findAuthenticateduserlookupByIdQuery);
+        while (resultSetOfAuthenticateduserlookupCheckByid.next()) {
+            return true;
+        }
+        return false;
     }
 
     private boolean isEppnCorrectlyUsed(Statement stmt, String authenticatedUserIdQuery) throws SQLException {
